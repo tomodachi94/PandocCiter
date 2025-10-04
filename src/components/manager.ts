@@ -27,14 +27,13 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import * as chokidar from "chokidar";
 import yaml = require("js-yaml");
 
 import { Extension } from "../extension";
 
 export class Manager {
   extension: Extension;
-  bibWatcher: chokidar.FSWatcher;
+  bibWatcher: vscode.FileSystemWatcher | undefined;
   watched: string[];
 
   constructor(extension: Extension) {
@@ -161,24 +160,50 @@ export class Manager {
     if (fs.existsSync(bibPath)) {
       this.extension.log(`Found file ${bibPath}`);
       if (this.bibWatcher === undefined) {
-        this.extension.log(`Creating file watcher for files.`);
-        this.bibWatcher = chokidar.watch(bibPath, { awaitWriteFinish: true });
-        this.bibWatcher.on("change", (filePath: string) => {
-          this.extension.log(
-            `Bib file watcher - responding to change in ${filePath}`
-          );
-          this.extension.completer.citation.parseBibFile(filePath);
+        this.extension.log(`Creating VSCode FileSystemWatcher for files.`);
+        // Watch only this bib file, non-recursively
+        const pattern = new vscode.RelativePattern(path.dirname(bibPath), path.basename(bibPath));
+        this.bibWatcher = vscode.workspace.createFileSystemWatcher(pattern, false, false, false);
+        this.bibWatcher.onDidChange((uri) => {
+          this.extension.log(`Bib file watcher - responding to change in ${uri.fsPath}`);
+          this.extension.completer.citation.parseBibFile(uri.fsPath);
         });
-        this.bibWatcher.on("unlink", (filePath: string) => {
-          this.extension.log(`Bib file watcher: ${filePath} deleted.`);
-          this.extension.completer.citation.forgetParsedBibItems(filePath);
-          this.bibWatcher.unwatch(filePath);
-          this.watched.splice(this.watched.indexOf(filePath), 1);
+        this.bibWatcher.onDidDelete((uri) => {
+          this.extension.log(`Bib file watcher: ${uri.fsPath} deleted.`);
+          this.extension.completer.citation.forgetParsedBibItems(uri.fsPath);
+          this.watched.splice(this.watched.indexOf(uri.fsPath), 1);
         });
+        this.bibWatcher.onDidCreate((uri) => {
+          this.extension.log(`Bib file watcher: ${uri.fsPath} created.`);
+          this.extension.completer.citation.parseBibFile(uri.fsPath);
+          if (this.watched.indexOf(uri.fsPath) < 0) {
+            this.watched.push(uri.fsPath);
+          }
+        });
+        this.watched.push(bibPath);
         this.extension.completer.citation.parseBibFile(bibPath);
       } else if (this.watched.indexOf(bibPath) < 0) {
         this.extension.log(`Adding file ${bibPath} to bib file watcher.`);
-        this.bibWatcher.add(bibPath);
+        // Dispose previous watcher and create a new one for the new file
+        this.bibWatcher.dispose();
+        const pattern = new vscode.RelativePattern(path.dirname(bibPath), path.basename(bibPath));
+        this.bibWatcher = vscode.workspace.createFileSystemWatcher(pattern, false, false, false);
+        this.bibWatcher.onDidChange((uri) => {
+          this.extension.log(`Bib file watcher - responding to change in ${uri.fsPath}`);
+          this.extension.completer.citation.parseBibFile(uri.fsPath);
+        });
+        this.bibWatcher.onDidDelete((uri) => {
+          this.extension.log(`Bib file watcher: ${uri.fsPath} deleted.`);
+          this.extension.completer.citation.forgetParsedBibItems(uri.fsPath);
+          this.watched.splice(this.watched.indexOf(uri.fsPath), 1);
+        });
+        this.bibWatcher.onDidCreate((uri) => {
+          this.extension.log(`Bib file watcher: ${uri.fsPath} created.`);
+          this.extension.completer.citation.parseBibFile(uri.fsPath);
+          if (this.watched.indexOf(uri.fsPath) < 0) {
+            this.watched.push(uri.fsPath);
+          }
+        });
         this.watched.push(bibPath);
         this.extension.completer.citation.parseBibFile(bibPath);
       } else {
@@ -192,7 +217,7 @@ export class Manager {
       let filePath = filesToForget[i];
       this.extension.log(`Forget unused bib file: ${filePath}`);
       this.extension.completer.citation.forgetParsedBibItems(filePath);
-      this.bibWatcher.unwatch(filePath);
+      // No direct unwatch, just remove from watched list
       this.watched.splice(this.watched.indexOf(filePath), 1);
     }
     return;
